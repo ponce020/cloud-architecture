@@ -14,6 +14,8 @@ Cada red se ha configurado como NAT para tener acceso a internet.
 | 01-private-mariadb | 192.168.11.0/24 | Red para sincronización de los datos entre los servidores de mariadb |
 | 02-private-maxscale | 192.168.12.0/24 | Red de comunicación entre el balanceador y los nodos de base de datos | 
 | 03-database-service | 192.168.13.0/24 | Red pública por la cual habrá comunicación entre los clientes y el clúster | 
+| 04-private-redis | 192.168.14.0/24 | Red publica de para que los clientes consuman el servicio de redis |
+| 05-cache-service | 192.168.15.0/24 | Red de comunicacion de los nodos redis |
 
 ## Listado de maquinas virtuales con sistema opertaivo ubuntu 22.04
 ![Listado de maquians virtuales](Adjuntos/MaquinasVirtuales.png)
@@ -26,6 +28,10 @@ Caracteristicas de las maquinas virtuales
 | Maria-1 | 1GB RAM, 2CPU, 15GB Storage |
 | Maria-2 | 1GB RAM, 2CPU, 15GB Storage |
 | Maria-3 | 1GB RAM, 2CPU, 15GB Storage |
+| HAProxy | 1GB RAM, 2CPU, 15GB Storage |
+| Redis-1 | 1GB RAM, 2CPU, 15GB Storage |
+| Redis-2 | 1GB RAM, 2CPU, 15GB Storage |
+| Redis-3 | 1GB RAM, 2CPU, 15GB Storage |
 
 # Cluster de Base de Datos
 
@@ -43,6 +49,11 @@ Asignación de direcciones IP de los nodos:
 | maria-2 | enp2s0 | 192.168.11.3 |
 | maria-3 | enp1s0 | 192.168.12.4 |
 | maria-3 | enp2s0 | 192.168.11.4 |
+| haproxy | enp1s0 | 192.168.15.180 |
+| haproxy | enp2s0 | 192.168.14.180 |
+| redis-1 | enp1s0 | 192.168.14.171 |
+| redis-2 | enp1s0 | 192.168.14.172 |
+| redis-3 | enp1s0 | 192.168.14.173 |
 
 
 ## Configuracion previa
@@ -336,3 +347,181 @@ La configuracion realizada cuenta con un panel de administracion web por el puer
 
 ![Visualizacion de la arquitectura del cluster](Adjuntos/MaxscalePanelVisualization.png)
 
+# Cluster de Redis
+
+![Cluster de Redis](Adjuntos/CacheCluster.png)
+
+Asignación de direcciones IP de los nodos:
+
+| Nodo | Interfaz | IP |
+| - | - | - |
+| haproxy | enp1s0 | 192.168.15.180 |
+| haproxy | enp2s0 | 192.168.14.180 |
+| redis-1 | enp1s0 | 192.168.14.171 |
+| redis-2 | enp1s0 | 192.168.14.172 |
+| redis-3 | enp1s0 | 192.168.14.173 |
+
+
+## Configuracion previa
+
+### Interfaces
+
+Para configurar las direcciones IP de las maquinas hay que editar el archivo de netplan.
+```bash
+sudo nano /etc/netplan/00-installer-config.yaml
+```
+
+Modificar el archivo para que quede de la siguiente manera teniendo en cuenta la indentación ya que es un archivo yaml. Modificar la direccion IP para cada nodo. Para los nodos redis solo basta con tener una interfaz.
+```yaml
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    enp1s0:
+      addresses:
+        - 192.168.15.180/24 
+      routes:
+        - to: default
+          via: 192.168.15.1
+      nameservers:
+        addresses: [192.168.15.1]
+    enp2s0:
+      addresses:
+        - 192.168.14.180/24
+      routes:
+        - to: 192.168.14.0/24
+          via: 192.168.14.1
+```
+
+### Hostname
+Ya que vamos a estar trabajando con varias maquias virtuales, es recomendado cambiar el hostname a todas para saber en todo momento, en que nodo estamos trabajando.
+```bash
+#Para el nodo maria-1
+sudo hostnamectl set-hostname redis-1 && exec bash
+
+#Para el nodo maria-2
+sudo hostnamectl set-hostname redis-2 && exec bash
+
+#Para el nodo maria-3
+sudo hostnamectl set-hostname redis-3 && exec bash
+
+#Para el nodo maxscale
+sudo hostnamectl set-hostname haproxy && exec bash
+```
+
+### Archivo hosts
+Para utilizar nombres de los nodos en lugar de direcciones IP en las configuraciones a realizar, los configuramos en el archivo hosts.
+```bash
+sudo nano /etc/hosts
+```
+Agregar las siguientes líneas en el archivo hosts de los nodos de mariadb:
+```lua
+192.168.14.171 redis-1
+192.168.14.172 redis-2
+192.168.14.173 redis-3
+```
+
+## Configuracion de los Nodos Redis
+### Instalacion de paquetes
+Agregamos los repsitorios de redis a la lista de repositorios de ubuntu para tener loss paquetes mas actualizados.
+```bash
+curl -fsSL https://packages.redis.io/gpg | sudo gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
+
+echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/redis.list
+```
+
+Una vez configurado los repositorios actualizar el indice de paquetes e instalacion de redis y sentinel
+```bash
+sudo apt update
+sudo apt install redis redis-sentinel -y
+```
+
+Habilitar el inicio de los servicios con el sistema
+```bash
+sudo systemctl enable redis-server
+sudo systemctl enable redis-sentinel
+```
+
+Se detiene los servicios temporalmente
+```bash
+sudo service redis-server stop
+sudo service redis-sentinel stop
+```
+
+### Configuracion del servicio de Redis Server
+Editar archivo de configuracion de redis-server
+```bash
+sudo nano /etc/redis/redis.conf
+```
+
+Modificamos las siguientes lineas del archivo en el nodo que servirá como maestro al inicio (linea 68 y 87):
+```php
+bind 192.168.14.171 127.0.0.1
+protected-mode no
+```
+
+En los nodos que inicialmente seran esclavos, modificar las lineas:
+```php
+bind 192.168.14.172 127.0.0.1 // 192.168.14.173 en el nodo redis-3
+protected-mode no
+slaveof 192.168.14.171 6379
+```
+
+### Configuracion del servicio de Redis Sentinel
+Modificamos el archivo de configuracion de redis-sentinel
+```bash
+sudo nano /etc/redis/sentinel.conf
+```
+
+En todos los nodos redis debe tener el siguiente contenido:
+```php
+protected-mode no  
+port 26379  
+daemonize yes  
+supervised systemd  
+pidfile "/run/sentinel/redis-sentinel.pid"  
+logfile "/var/log/redis/redis-sentinel.log"  
+dir "/var/lib/redis"  
+sentinel monitor mymaster 192.168.14.171 6379 2  // importante poner esta linea primero
+sentinel down-after-milliseconds mymaster 5000  //viene comentada por defecto
+acllog-max-len 128  
+sentinel failover-timeout mymaster 10000  // viene conectada por defecto
+sentinel deny-scripts-reconfig yes  
+```
+
+### Inicializacion de los servicios
+Ya que los servicios se inicializan al instalar los paquetes, debemos reiniciar los servicios
+```bash
+sudo service redis-server restart
+sudo service redis-sentinel restart
+```
+
+### Prueba de replicacion
+Para probar que la replicacion de la informacion está funcionado debemos saber que rol ejecuta cada uno de los nodos. Para eso ejecutamos el siguiente comando:
+```bash
+redis-cli -p 6379 info replication | grep role
+```
+
+Debemos saber el nodo que inicialmente está sirviendo como master. Debe devolver lo siguiente:
+```php
+role:master
+```
+
+Los otros nodos deben devolver:
+```php
+role:slave
+```
+
+En el nodo master debemos ingresar una llave, ya que es el unico en el que se puede escribir informacion.
+```bash
+redis-cli set my-key "Hola Mundo"
+```
+
+Ahora en los nodos esclavos debemos obtener la llave ejecutando el comando:
+```bash
+redis-cli get my-key
+```
+
+Si se muestra "Hola Mundo" entonces la replicacion está funcionando correctamente.
+
+![Cache redis role](Adjuntos/CacheRedisTest.png)

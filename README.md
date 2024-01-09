@@ -525,3 +525,80 @@ redis-cli get my-key
 Si se muestra "Hola Mundo" entonces la replicacion está funcionando correctamente.
 
 ![Cache redis role](Adjuntos/CacheRedisTest.png)
+
+
+## Configuracion de HAProxy
+### Instalacion del paquete
+El paquete de balanceo es haproxy:
+```bash
+sudo apt install haproxy -y
+```
+
+### Configurando el servicio
+Se va a configrar haproxy para estar continuamente preguntando a los nodos de redis, cual es el maestro para poder escribir los datos que vengan de los cleintes en el nodo correcto.
+
+Editamos el archivo:
+```bash
+sudo nano /etc/haproxy/haproxy.cfg
+```
+
+Borramos el contenido y escribimos el siguiente nuevo contenido:
+```php
+defaults REDIS
+    mode tcp
+    timeout connect 3s
+    timeout server 6s
+    timeout client 6s
+
+frontend http
+        bind :8080
+        default_backend stats
+
+
+backend stats
+        mode http
+        stats enable
+        stats uri /
+        stats refresh 1s
+        stats show-legends
+        stats admin if TRUE
+
+frontend ft_redis
+    bind 192.168.15.180:6379 name redis
+    default_backend bk_redis
+
+backend bk_redis
+    option tcp-check
+    tcp-check connect
+    tcp-check send PING\r\n
+    tcp-check expect string +PONG
+    tcp-check send info\ replication\r\n
+    tcp-check expect string role:master
+    tcp-check send QUIT\r\n
+    tcp-check expect string +OK
+    server redis-1 192.168.14.171:6379 check inter 1s
+    server redis-2 192.168.14.172:6379 check inter 1s
+    server redis-3 192.168.14.173:6379 check inter 1s
+
+backend redis-online
+        mode tcp
+        balance roundrobin
+        option tcp-check
+
+        tcp-check send PING\r\n
+        tcp-check expect string +PONG
+
+        server redis-1:192.168.14.171:6379 192.168.14.171:6379 maxconn 1024 check inter 1s
+        server redis-2:192.168.14.172:6379 192.168.14.172:6379 maxconn 1024 check inter 1s
+        server redis-3:192.168.14.173:6379 192.168.14.173:6379 maxconn 1024 check inter 1s
+```
+
+Reiniciamos el servcio para correr el servicio con la nueva configuracion
+```bash
+sudo systemctl restart haproxy
+```
+
+En el cuadro bk_redis se muestra en verde el nodo que esta sirviendo como master y en rojo los que son slave.
+En el cuadro redis-online vemos el estado de los nodos sin importar el rol. Se muestran en verde los que estan activos. Si un nodo se apaga se mostrara en rojo.
+
+![Vist de HProxy](Adjuntos/HAProxyView.png)
